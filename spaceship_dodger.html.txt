@@ -1,0 +1,563 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Spaceship Dodger</title>
+<style>
+  :root { --fg:#eaf6ff; --bg:#0b1020; --accent:#62d0ff; --warn:#ff6b6b; --ok:#7ef29a; }
+  html,body{height:100%;margin:0;background:radial-gradient(1200px 800px at 50% -10%,#12203a 0%,#0b1020 60%,#060914 100%);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial,sans-serif;}
+  #ui{position:fixed;inset:0;pointer-events:none}
+  .hud{position:fixed;left:0;right:0;top:0;display:flex;gap:12px;justify-content:space-between;align-items:center;padding:10px 14px;font-weight:600;font-size:14px;background:linear-gradient(180deg,rgba(0,0,0,.35),rgba(0,0,0,0));backdrop-filter:saturate(120%) blur(4px)}
+  .pill{display:inline-flex;align-items:center;gap:8px;padding:6px 10px;border-radius:999px;background:rgba(255,255,255,.08)}
+  .btnbar{position:fixed;right:10px;bottom:10px;display:flex;gap:8px}
+  .btn{pointer-events:auto;user-select:none;border:0;border-radius:10px;padding:10px 14px;font-weight:700;background:rgba(255,255,255,.1);color:var(--fg);box-shadow:0 4px 16px rgba(0,0,0,.25);backdrop-filter:blur(4px)}
+  .btn:active{transform:translateY(1px)}
+  canvas{display:block;width:100vw;height:100svh;touch-action:none}
+  #overlay{position:fixed;inset:0;display:grid;place-items:center;background:rgba(6,9,20,.6);backdrop-filter:blur(3px);pointer-events:auto}
+  .card{width:min(92vw,520px);border-radius:16px;background:rgba(10,14,28,.9);padding:22px 20px;box-shadow:0 10px 40px rgba(0,0,0,.5);text-align:center}
+  .title{font-size:28px;margin:6px 0 6px}
+  .subtitle{opacity:.9;margin:0 0 16px}
+  .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+  .big{font-size:18px;padding:12px 16px}
+  .chip{display:inline-block;margin:2px 6px;padding:4px 10px;border-radius:999px;background:rgba(255,255,255,.08);font-size:13px}
+  .hint{opacity:.8;font-size:12px;margin-top:10px}
+  .newbest{color:#ffd86b;font-weight:800}
+</style>
+</head>
+<body>
+<canvas id="game" aria-label="Spaceship Dodger"></canvas>
+
+<div id="ui">
+  <div class="hud">
+    <div class="pill">⏱️ Time: <span id="time">0.0</span>s</div>
+    <div class="pill">⭐ Score: <span id="score">0</span></div>
+    <div class="pill">🏆 Best: <span id="best">0</span></div>
+    <div class="pill">🛡️ Lives: <span id="lives">3</span></div>
+  </div>
+  <div class="btnbar">
+    <button class="btn" id="muteBtn" aria-label="Toggle sound">🔊 Sound</button>
+    <button class="btn" id="pauseBtn" aria-label="Pause or resume">⏸️ Pause</button>
+    <button class="btn" id="restartBtn" aria-label="Restart game">🔄 Restart</button>
+  </div>
+</div>
+
+<div id="overlay" hidden>
+  <div class="card">
+    <div class="title" id="ovTitle">Spaceship Dodger</div>
+    <div class="subtitle" id="ovSubtitle">Drag to move on phone. Use ← → on keyboard. Avoid meteors, collect stars.</div>
+    <div id="ovStats"></div>
+    <div class="row">
+      <button class="btn big" id="startBtn">🚀 Start</button>
+    </div>
+    <div class="hint">
+      Tips: Grab <span class="chip">🟦 Shield</span> for one‑hit protection •
+      <span class="chip">🟪 Slow‑mo</span> to slow everything briefly. <br/>
+      Sound auto‑enables after you press Start (mobile requirement).
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
+
+  const hud = {
+    time: document.getElementById('time'),
+    score: document.getElementById('score'),
+    lives: document.getElementById('lives'),
+    best: document.getElementById('best'),
+    pauseBtn: document.getElementById('pauseBtn'),
+    restartBtn: document.getElementById('restartBtn'),
+    muteBtn: document.getElementById('muteBtn'),
+  };
+
+  const overlay = document.getElementById('overlay');
+  const ovTitle = document.getElementById('ovTitle');
+  const ovSubtitle = document.getElementById('ovSubtitle');
+  const ovStats = document.getElementById('ovStats');
+  const startBtn = document.getElementById('startBtn');
+
+  // High score (persisted)
+  const HS_KEY = 'sd_highscore_v2';
+  function getBest(){ const v = Number(localStorage.getItem(HS_KEY) || 0); return Number.isFinite(v) ? v : 0; }
+  function setBest(v){ localStorage.setItem(HS_KEY, String(v)); }
+  hud.best.textContent = getBest();
+
+  // Device pixel ratio scaling for crisp canvas
+  function resize() {
+    const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+    const w = Math.max(320, Math.floor(window.innerWidth));
+    const h = Math.max(320, Math.floor(window.innerHeight));
+    canvas.style.width = w + 'px';
+    canvas.style.height = h + 'px';
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  window.addEventListener('resize', resize, { passive: true });
+  resize();
+
+  // ---- Tiny Sound Engine (Web Audio) ----
+  const audio = {
+    ctx: null,
+    enabled: true,
+    init() {
+      if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+    },
+    async resume() {
+      if (this.ctx && this.ctx.state !== 'running') { try { await this.ctx.resume(); } catch{} }
+    },
+    play({type='sine', freq=440, dur=0.12, gain=0.08, attack=0.005, release=0.05, sweep=1, endFreq=null}={}) {
+      if (!this.enabled) return;
+      if (!this.ctx) return;
+      const t0 = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const g = this.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t0);
+      if (endFreq!=null){
+        osc.frequency.exponentialRampToValueAtTime(Math.max(20,endFreq), t0 + dur);
+      } else if (sweep !== 1){
+        osc.frequency.exponentialRampToValueAtTime(Math.max(20,freq*sweep), t0 + dur);
+      }
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur + release);
+      osc.connect(g).connect(this.ctx.destination);
+      osc.start(t0);
+      osc.stop(t0 + dur + release + 0.02);
+    }
+  };
+
+  const sfx = {
+    click: () => audio.play({type:'triangle', freq:400, dur:0.06, gain:0.05, sweep:1.2}),
+    start: () => { audio.play({type:'sawtooth', freq:260, dur:0.12, gain:0.07, sweep:1.8}); audio.play({type:'triangle', freq:520, dur:0.18, gain:0.05, sweep:1.2}); },
+    star: () => audio.play({type:'sine', freq:880, dur:0.08, gain:0.07, sweep:1.6}),
+    shield: () => audio.play({type:'square', freq:320, dur:0.25, gain:0.06, endFreq:640}),
+    slow: () => audio.play({type:'sine', freq:500, dur:0.25, gain:0.05, endFreq:250}),
+    hit: () => { audio.play({type:'square', freq:140, dur:0.12, gain:0.09, sweep:0.6}); audio.play({type:'sawtooth', freq:90, dur:0.16, gain:0.06, sweep:0.5}); },
+    gameOver: () => { audio.play({type:'triangle', freq:440, dur:0.12, gain:0.06, sweep:0.5}); setTimeout(()=>audio.play({type:'triangle', freq:330, dur:0.18, gain:0.06, sweep:0.5}), 120); }
+  };
+
+  // Game state
+  const state = {
+    running: false,
+    paused: false,
+    over: false,
+    timeStart: 0,
+    timeNow: 0,
+    score: 0,
+    lives: 3,
+    shield: 0,      // seconds remaining
+    slowmo: 0,      // seconds remaining
+    difficulty: 1,
+    rngSeed: Math.floor(Math.random() * 1e9),
+    best: getBest(),
+    newBest: false,
+  };
+
+  // RNG
+  function rng() {
+    let x = state.rngSeed |= 0;
+    x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+    state.rngSeed = x;
+    return (x >>> 0) / 4294967296;
+  }
+
+  // Entities
+  const ship = { x: canvas.width/2, y: canvas.height - 120, w: 36, h: 44, vx: 0, speed: 520, targetX: null, invuln: 0 };
+  const meteors = [];
+  const stars = [];
+  const powerups = [];
+
+  // Input
+  const keys = new Set();
+  window.addEventListener('keydown', (e) => {
+    if (['ArrowLeft','ArrowRight','a','d','A','D','p','P',' '].includes(e.key)) e.preventDefault();
+    if (e.key === 'p' || e.key === 'P') togglePause();
+    else if (e.key === ' ' && state.over) startGame();
+    else if (['ArrowLeft','a','A'].includes(e.key)) keys.add('left');
+    else if (['ArrowRight','d','D'].includes(e.key)) keys.add('right');
+  }, { passive: false });
+  window.addEventListener('keyup', (e) => {
+    if (['ArrowLeft','a','A'].includes(e.key)) keys.delete('left');
+    if (['ArrowRight','d','D'].includes(e.key)) keys.delete('right');
+  });
+
+  // Pointer drag control
+  let dragging = false;
+  function toLocal(e){
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.touches?.[0]?.clientX ?? e.clientX) - rect.left;
+    const y = (e.touches?.[0]?.clientY ?? e.clientY) - rect.top;
+    return {x, y};
+  }
+  canvas.addEventListener('pointerdown', (e)=>{ dragging=true; ship.targetX = toLocal(e).x; });
+  canvas.addEventListener('pointermove', (e)=>{ if(dragging){ ship.targetX = toLocal(e).x; }});
+  window.addEventListener('pointerup', ()=>{ dragging=false; ship.targetX=null; });
+
+  // Buttons
+  function wireBtn(el, fn){ el.addEventListener('click', ()=>{ sfx.click(); fn(); }); }
+  wireBtn(hud.pauseBtn, ()=>togglePause());
+  wireBtn(hud.restartBtn, ()=>startGame());
+  wireBtn(hud.muteBtn, ()=>{
+    audio.enabled = !audio.enabled;
+    hud.muteBtn.textContent = audio.enabled ? '🔊 Sound' : '🔇 Muted';
+  });
+  startBtn.addEventListener('click', async () => {
+    audio.init();
+    await audio.resume(); // mobile audio unlock
+    sfx.start();
+    startGame();
+  });
+
+  function togglePause(){
+    if (!state.running) return;
+    state.paused = !state.paused;
+    hud.pauseBtn.textContent = state.paused ? '▶️ Resume' : '⏸️ Pause';
+    overlay.hidden = !state.paused;
+    if (state.paused){
+      ovTitle.textContent = 'Paused';
+      ovSubtitle.textContent = 'Drag to move • Avoid meteors • Collect stars';
+      ovStats.innerHTML = statHtml();
+    } else {
+      audio.resume();
+    }
+  }
+
+  function reset() {
+    state.running = false; state.over = false; state.paused = false;
+    state.score = 0; state.lives = 3; state.shield = 0; state.slowmo = 0;
+    state.difficulty = 1; state.timeStart = performance.now(); state.timeNow = state.timeStart;
+    state.newBest = false;
+    meteors.length = 0; stars.length = 0; powerups.length = 0;
+    ship.x = canvas.width/2; ship.y = canvas.height - 120; ship.vx = 0; ship.invuln = 0;
+  }
+
+  function startGame(){
+    reset();
+    state.running = true;
+    overlay.hidden = true;
+    hud.pauseBtn.textContent = '⏸️ Pause';
+  }
+
+  function maybeUpdateBest(){
+    if (state.score > state.best){
+      state.best = state.score;
+      setBest(state.best);
+      hud.best.textContent = state.best;
+      state.newBest = true;
+    }
+  }
+
+  function gameOver(){
+    state.over = true; state.running = false;
+    maybeUpdateBest();
+    overlay.hidden = false;
+    ovTitle.textContent = 'Game Over';
+    ovSubtitle.textContent = state.newBest ? '🔥 New Best Score!' : 'Nice run! Want another go?';
+    ovStats.innerHTML = statHtml();
+    startBtn.textContent = '🔁 Play Again';
+    sfx.gameOver();
+  }
+
+  function statHtml(){
+    const t = ((state.timeNow - state.timeStart)/1000).toFixed(1);
+    const bestBadge = state.newBest ? ' <span class="newbest">NEW!</span>' : '';
+    return `<div style="margin:6px 0 2px">⏱️ Time: <b>${t}s</b></div>
+            <div>⭐ Score: <b>${state.score}</b></div>
+            <div>🏆 Best: <b>${state.best}</b>${bestBadge}</div>`;
+  }
+
+  // Spawning helpers
+  function spawnMeteor() {
+    const w = 22 + rng()*28;
+    const x = 20 + rng() * (canvas.width/ (window.devicePixelRatio||1) - 40);
+    const y = -40;
+    const speed = 140 + state.difficulty*60 + rng()*80;
+    const vx = (rng()*2-1)* (20 + state.difficulty*8);
+    meteors.push({x,y,w,h:w,vy:speed,vx,spin:(rng()*6-3),rot:0});
+  }
+
+  function spawnStar(){
+    const x = 20 + rng() * (canvas.width/ (window.devicePixelRatio||1) - 40);
+    const y = -20;
+    const vy = 120 + rng()*80 + state.difficulty*40;
+    stars.push({x,y,r:6+rng()*4,vy});
+  }
+
+  function spawnPowerup(){
+    const type = rng() < 0.5 ? 'shield' : 'slow';
+    const x = 20 + rng() * (canvas.width/ (window.devicePixelRatio||1) - 40);
+    const y = -24;
+    const vy = 110 + rng()*60 + state.difficulty*30;
+    powerups.push({type,x,y,r:10,vy});
+  }
+
+  // Collision helpers
+  function rectCircleCollide(rx,ry,rw,rh,cx,cy,cr){
+    const nx = Math.max(rx, Math.min(cx, rx+rw));
+    const ny = Math.max(ry, Math.min(cy, ry+rh));
+    const dx = cx-nx, dy = cy-ny;
+    return (dx*dx + dy*dy) <= cr*cr;
+  }
+  function rectRectCollide(a,b){
+    return a.x < b.x+b.w && a.x+a.w > b.x && a.y < b.y+b.h && a.y+a.h > b.y;
+  }
+
+  // Drawing
+  function drawShip() {
+    const {x,y,w,h} = ship;
+    ctx.save();
+    ctx.translate(x, y);
+    // Exhaust
+    const t = performance.now() / 120;
+    ctx.fillStyle = 'rgba(255,200,80,0.85)';
+    ctx.beginPath();
+    ctx.moveTo(-w*0.18, h*0.55);
+    ctx.lineTo(w*0.18, h*0.55);
+    ctx.lineTo(0, h*0.85 + Math.sin(t)*6);
+    ctx.closePath();
+    ctx.fill();
+
+    // Body
+    const grad = ctx.createLinearGradient(0, -h*0.5, 0, h*0.6);
+    grad.addColorStop(0, '#9be7ff');
+    grad.addColorStop(1, '#0ad');
+    ctx.fillStyle = grad;
+    ctx.strokeStyle = 'rgba(255,255,255,.5)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.moveTo(0,-h*0.55);
+    ctx.quadraticCurveTo(w*0.42, -h*0.1, w*0.28, h*0.55);
+    ctx.lineTo(-w*0.28, h*0.55);
+    ctx.quadraticCurveTo(-w*0.42, -h*0.1, 0,-h*0.55);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+
+    // Cockpit
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath();
+    ctx.ellipse(0, -h*0.2, w*0.18, h*0.18, 0, 0, Math.PI*2);
+    ctx.fill();
+
+    // Shield aura
+    if (state.shield > 0){
+      ctx.strokeStyle = 'rgba(98,208,255,0.9)';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(0,0, Math.max(w,h)*0.7 + 4*Math.sin(performance.now()/150), 0, Math.PI*2);
+      ctx.stroke();
+    }
+    // Damage blink
+    if (ship.invuln > 0 && Math.floor(performance.now()/100)%2===0){
+      ctx.globalAlpha = 0.4;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-w*0.35, -h*0.6, w*0.7, h*1.2);
+    }
+    ctx.restore();
+  }
+
+  function drawMeteor(m) {
+    ctx.save();
+    ctx.translate(m.x, m.y);
+    ctx.rotate(m.rot);
+    const g = ctx.createRadialGradient(0,0,4,0,0,m.w/1.2);
+    g.addColorStop(0, '#c87e52');
+    g.addColorStop(1, '#6b3b22');
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.moveTo(-m.w/2, -m.h/2);
+    for (let i=0;i<7;i++){
+      const angle = (i/7)*Math.PI*2;
+      const r = m.w/2 * (0.75 + (i%2?0.25:0.05));
+      ctx.lineTo(Math.cos(angle)*r, Math.sin(angle)*r);
+    }
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawStar(s){
+    ctx.save(); ctx.translate(s.x, s.y);
+    ctx.fillStyle = '#ffd86b';
+    ctx.beginPath();
+    for(let i=0;i<10;i++){
+      const a = i * Math.PI/5;
+      const r = (i%2? s.r: s.r*0.5);
+      ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r);
+    }
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+
+  function drawPowerup(p){
+    ctx.save(); ctx.translate(p.x, p.y);
+    ctx.beginPath();
+    ctx.arc(0,0,p.r,0,Math.PI*2);
+    ctx.closePath();
+    ctx.fillStyle = p.type==='shield' ? '#62d0ff' : '#b07cff';
+    ctx.shadowColor = ctx.fillStyle; ctx.shadowBlur = 10;
+    ctx.fill(); ctx.shadowBlur = 0;
+    ctx.fillStyle = '#0b1020';
+    ctx.font = 'bold 12px system-ui';
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(p.type==='shield'?'S':'⏱',0,1);
+    ctx.restore();
+  }
+
+  // Starfield background
+  const bgStars = Array.from({length: 120}, () => ({
+    x: rng()*window.innerWidth,
+    y: rng()*window.innerHeight,
+    r: rng()*1.6 + 0.2,
+    s: rng()*0.6 + 0.2
+  }));
+
+  function drawBackground(){
+    ctx.fillStyle = '#060914';
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.save();
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#9bd4ff';
+    for (const st of bgStars){
+      st.y += st.s * (state.slowmo>0 ? 0.35 : 1.0);
+      if (st.y > window.innerHeight + 2) st.y = -2, st.x = rng()*window.innerWidth;
+      ctx.beginPath(); ctx.arc(st.x, st.y, st.r, 0, Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  // Loop & logic
+  let last = performance.now();
+  function loop(now){
+    requestAnimationFrame(loop);
+    if (!state.running || state.paused) { drawBackground(); if (!state.running) drawShip(); return; }
+
+    const dt = Math.min(0.033, (now - last)/1000) * (state.slowmo>0 ? 0.4 : 1.0);
+    last = now;
+    state.timeNow = now;
+
+    // Increase difficulty gradually
+    state.difficulty += dt * 0.06;
+
+    // Spawn rates scale with difficulty
+    if (rng() < dt * (0.9 + state.difficulty*0.25)) spawnMeteor();
+    if (rng() < dt * (0.25 + state.difficulty*0.05)) spawnStar();
+    if (rng() < dt * 0.025) spawnPowerup();
+
+    // Move ship by keys or drag
+    const speed = ship.speed;
+    if (keys.has('left')) ship.vx = -speed;
+    else if (keys.has('right')) ship.vx = speed;
+    else ship.vx = 0;
+
+    if (ship.targetX != null){
+      const dx = ship.targetX - ship.x;
+      ship.vx = Math.max(-speed, Math.min(speed, dx*6));
+    }
+
+    ship.x += ship.vx * dt;
+    const W = canvas.width / (window.devicePixelRatio||1);
+    const H = canvas.height / (window.devicePixelRatio||1);
+    ship.x = Math.max(28, Math.min(W-28, ship.x));
+    ship.y = H - 120;
+
+    // Timers
+    if (ship.invuln > 0) ship.invuln -= dt;
+    if (state.shield > 0) state.shield -= dt;
+    if (state.slowmo > 0) state.slowmo -= dt;
+
+    // Update meteors
+    for (let i=meteors.length-1;i>=0;i--){
+      const m = meteors[i];
+      m.y += m.vy * dt;
+      m.x += m.vx * dt;
+      m.rot += m.spin * dt * 0.02;
+      if (m.y > H + 60 || m.x < -80 || m.x > W + 80) meteors.splice(i,1);
+    }
+
+    // Update stars
+    for (let i=stars.length-1;i>=0;i--){
+      const s = stars[i];
+      s.y += s.vy * dt;
+      if (s.y > H + 30) stars.splice(i,1);
+    }
+
+    // Update powerups
+    for (let i=powerups.length-1;i>=0;i--){
+      const p = powerups[i];
+      p.y += p.vy * dt;
+      if (p.y > H + 40) powerups.splice(i,1);
+    }
+
+    // Collisions
+    const shipRect = {x: ship.x-18, y: ship.y-22, w: 36, h: 44};
+
+    // with meteors
+    for (let i=meteors.length-1;i>=0;i--){
+      const m = meteors[i];
+      if (rectRectCollide(shipRect, {x:m.x-m.w/2, y:m.y-m.h/2, w:m.w, h:m.h})){
+        if (state.shield > 0){
+          state.shield = 0;
+          meteors.splice(i,1);
+          state.score += 5;
+          ship.invuln = 0.7;
+          sfx.hit(); // light hit when shield pops
+        } else if (ship.invuln <= 0){
+          state.lives -= 1;
+          ship.invuln = 1.2;
+          meteors.splice(i,1);
+          sfx.hit();
+          if (state.lives <= 0) gameOver();
+        }
+      }
+    }
+
+    // with stars
+    for (let i=stars.length-1;i>=0;i--){
+      const s = stars[i];
+      if (rectCircleCollide(shipRect.x, shipRect.y, shipRect.w, shipRect.h, s.x, s.y, s.r)){
+        state.score += 10;
+        stars.splice(i,1);
+        sfx.star();
+      }
+    }
+
+    // with powerups
+    for (let i=powerups.length-1;i>=0;i--){
+      const p = powerups[i];
+      if (rectCircleCollide(shipRect.x, shipRect.y, shipRect.w, shipRect.h, p.x, p.y, p.r)){
+        if (p.type==='shield'){ state.shield = 6; sfx.shield(); } else { state.slowmo = 4; sfx.slow(); }
+        powerups.splice(i,1);
+      }
+    }
+
+    // Score over time
+    state.score += Math.floor(20 * dt);
+
+    // Draw
+    drawBackground();
+    drawShip();
+    for (const s of stars) drawStar(s);
+    for (const p of powerups) drawPowerup(p);
+    for (const m of meteors) drawMeteor(m);
+
+    // HUD
+    hud.time.textContent = ((state.timeNow - state.timeStart)/1000).toFixed(1);
+    hud.score.textContent = state.score;
+    hud.lives.textContent = state.lives;
+  }
+
+  // Kick off
+  overlay.hidden = false;
+  ovTitle.textContent = 'Spaceship Dodger';
+  ovSubtitle.textContent = 'Drag to move • Avoid meteors • Collect stars • 3 lives';
+  ovStats.innerHTML = '';
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
+
